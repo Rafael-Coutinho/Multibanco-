@@ -1,8 +1,8 @@
 import { defineConfig } from "@trigger.dev/sdk";
 
 export default defineConfig({
-  // Substituir pelo project ref do dashboard do Trigger.dev (Settings → Project ref).
-  project: process.env.TRIGGER_PROJECT_REF ?? "proj_REPLACE_ME",
+  // Project ref do dashboard do Trigger.dev (Settings → Project ref).
+  project: "proj_cnfabzacyhgolznzvkql",
   dirs: ["./trigger"],
   // A tarefa de lembretes chega a esperar 5 dias entre passos. Os waits > 5s são
   // checkpointed pelo Trigger.dev, mas damos margem generosa ao maxDuration de cada
