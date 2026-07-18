@@ -1,0 +1,23 @@
+{
+  "name": "lembretes-multibanco-whatsapp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Automação de lembretes por WhatsApp para encomendas Multibanco pendentes (Shopify + Trigger.dev + EvolutionAPI)",
+  "type": "module",
+  "scripts": {
+    "dev": "trigger.dev@latest dev",
+    "deploy": "trigger.dev@latest deploy",
+    "test:messages": "node --experimental-strip-types scripts/test-messages.ts",
+    "test:evolution": "node --experimental-strip-types scripts/test-evolution.ts",
+    "test:shopify": "node --experimental-strip-types scripts/test-shopify.ts"
+  },
+  "dependencies": {
+    "@trigger.dev/sdk": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@vercel/node": "^5.0.0",
+    "trigger.dev": "^4.0.0",
+    "typescript": "^5.6.0"
+  }
+}
