@@ -4,6 +4,9 @@
   "private": true,
   "description": "Automação de lembretes por WhatsApp para encomendas Multibanco pendentes (Shopify + Trigger.dev + EvolutionAPI)",
   "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "dev": "trigger.dev@latest dev",
     "deploy": "trigger.dev@latest deploy",
