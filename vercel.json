@@ -3,6 +3,15 @@
   "functions": {
     "api/shopify-webhook.ts": {
       "maxDuration": 10
+    },
+    "api/stats.ts": {
+      "maxDuration": 30
+    },
+    "api/dashboard.ts": {
+      "maxDuration": 10
     }
-  }
+  },
+  "rewrites": [
+    { "source": "/dashboard", "destination": "/api/dashboard" }
+  ]
 }
