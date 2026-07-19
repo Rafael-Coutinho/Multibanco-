@@ -106,6 +106,35 @@ const PAGE = `<!DOCTYPE html>
   .breakdown { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px;
     color: var(--muted); font-size: 12.5px; }
   .breakdown b { color: var(--text); }
+  /* ── gráficos ── */
+  .charts { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  .chart-title {
+    font-size: 12px; color: var(--muted); text-transform: uppercase;
+    letter-spacing: 1.4px; margin-bottom: 4px;
+  }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 2px 0 8px;
+    font-size: 12px; color: var(--muted); }
+  .legend .sw { display: inline-block; width: 10px; height: 10px;
+    border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+  .chart-svg { width: 100%; height: auto; display: block; }
+  #tooltip {
+    position: fixed; pointer-events: none; display: none; z-index: 10;
+    background: #ffffff; border: 1px solid var(--line); border-radius: 4px;
+    box-shadow: 0 2px 10px rgba(33,33,33,0.12); padding: 8px 11px;
+    font-size: 12.5px; color: var(--text); line-height: 1.5;
+  }
+  #tooltip .tt-date { color: var(--muted); font-size: 11.5px; }
+  /* ── feed de atividade ── */
+  .feed { list-style: none; padding: 4px 0 0; }
+  .feed li { display: flex; gap: 12px; padding: 8px 4px; align-items: baseline;
+    border-bottom: 1px solid var(--line); font-size: 14px; }
+  .feed li:last-child { border-bottom: none; }
+  .feed .when { color: var(--muted); font-size: 12px; white-space: nowrap;
+    min-width: 84px; font-variant-numeric: tabular-nums; }
+  .feed .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+    flex: none; align-self: center; }
+  .feed .val { font-family: var(--serif); font-weight: 700; color: var(--green); }
+  .feed .muted { color: var(--muted); }
   footer {
     margin-top: 40px; text-align: center; color: var(--muted);
     font-size: 12px; letter-spacing: 0.4px;
@@ -146,6 +175,35 @@ const PAGE = `<!DOCTYPE html>
 </div>
 
 <section>
+  <div class="charts">
+    <div class="card">
+      <div class="chart-title">Lembretes por dia</div>
+      <div class="legend">
+        <span><span class="sw" style="background:#b8862b"></span>1º lembrete</span>
+        <span><span class="sw" style="background:#1f6f9e"></span>2º lembrete</span>
+        <span><span class="sw" style="background:#b0562e"></span>3º lembrete</span>
+      </div>
+      <div id="c-reminders"></div>
+    </div>
+    <div class="card">
+      <div class="chart-title">Valor recuperado por dia</div>
+      <div class="legend"><span><span class="sw" style="background:#1c911f"></span>€ de encomendas pagas após lembrete</span></div>
+      <div id="c-recovered"></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="dot">●</span> Atividade recente</h2>
+  <div class="card" style="padding:8px 16px">
+    <ul class="feed" id="feed"></ul>
+    <div class="empty" id="e-feed" style="display:none">Ainda sem atividade.</div>
+  </div>
+</section>
+
+<div id="tooltip"></div>
+
+<section>
   <h2><span class="dot">●</span> Encomendas recuperadas</h2>
   <div class="card" style="padding:0; overflow:hidden">
     <table id="t-recovered">
@@ -180,6 +238,109 @@ const PAGE = `<!DOCTYPE html>
 <script>
 const KEY = new URLSearchParams(location.search).get("key") || "";
 const eur = v => v.toLocaleString("pt-PT", { style: "currency", currency: "EUR" });
+const C = { r1: "#b8862b", r2: "#1f6f9e", r3: "#b0562e", green: "#1c911f" };
+const tooltip = () => document.getElementById("tooltip");
+
+function showTip(html, ev) {
+  const t = tooltip();
+  t.innerHTML = html; t.style.display = "block";
+  const x = Math.min(ev.clientX + 14, window.innerWidth - t.offsetWidth - 8);
+  t.style.left = x + "px"; t.style.top = (ev.clientY - t.offsetHeight - 10) + "px";
+}
+function hideTip() { tooltip().style.display = "none"; }
+
+function fmtDay(d) { const [,m,dd] = d.split("-"); return dd + "/" + m; }
+
+/**
+ * Gráfico de barras diário em SVG.
+ * series: [{key,color,label}] — empilhadas por dia com gap de 2px.
+ * fmtVal: formata o total para labels/tooltip.
+ */
+function barChart(elId, days, series, fmtVal) {
+  const el = document.getElementById(elId);
+  const W = 560, H = 190, padL = 30, padB = 22, padT = 16;
+  const iw = W - padL - 6, ih = H - padT - padB;
+  const totals = days.map(d => series.reduce((s, sr) => s + d[sr.key], 0));
+  const max = Math.max(1, ...totals);
+  const n = days.length;
+  const slot = iw / n, bw = Math.min(34, slot * 0.55);
+  // grelha discreta: 2 linhas
+  let g = "";
+  for (const f of [0.5, 1]) {
+    const y = padT + ih - ih * f;
+    g += '<line x1="' + padL + '" y1="' + y + '" x2="' + (padL + iw) + '" y2="' + y +
+      '" stroke="#e5ddcf" stroke-width="1"/>' +
+      '<text x="' + (padL - 6) + '" y="' + (y + 3.5) + '" text-anchor="end" font-size="10" fill="#857f72">' +
+      fmtVal(max * f, true) + "</text>";
+  }
+  let bars = "", hits = "";
+  days.forEach((d, i) => {
+    const cx = padL + slot * i + slot / 2;
+    let y = padT + ih;
+    let segs = "";
+    series.forEach(sr => {
+      const v = d[sr.key];
+      if (!v) return;
+      const h = Math.max(2, ih * v / max);
+      y -= h;
+      // gap de 2px entre segmentos: contorno da cor do cartão
+      segs += '<rect x="' + (cx - bw / 2) + '" y="' + y + '" width="' + bw + '" height="' + h +
+        '" rx="3" fill="' + sr.color + '" stroke="#ffffff" stroke-width="2"/>';
+    });
+    bars += segs;
+    if (totals[i] > 0) {
+      bars += '<text x="' + cx + '" y="' + (y - 5) + '" text-anchor="middle" font-size="10.5" fill="#857f72">' +
+        fmtVal(totals[i]) + "</text>";
+    }
+    bars += '<text x="' + cx + '" y="' + (H - 6) + '" text-anchor="middle" font-size="10.5" fill="#857f72">' +
+      fmtDay(d.date) + "</text>";
+    // alvo de hover maior que a marca
+    const rows = series.filter(sr => d[sr.key]).map(sr =>
+      '<span style="color:#857f72">' + sr.label + ":</span> <b>" + fmtVal(d[sr.key]) + "</b>").join("<br>");
+    const tip = '<div class="tt-date">' + fmtDay(d.date) + "</div>" +
+      (rows || '<span style="color:#857f72">sem atividade</span>') +
+      (series.length > 1 && totals[i] ? '<br><span style="color:#857f72">total:</span> <b>' + fmtVal(totals[i]) + "</b>" : "");
+    hits += '<rect x="' + (padL + slot * i) + '" y="' + padT + '" width="' + slot + '" height="' + ih +
+      '" fill="transparent" data-tip="' + tip.replace(/"/g, "&quot;") + '"/>';
+  });
+  el.innerHTML = '<svg class="chart-svg" viewBox="0 0 ' + W + " " + H + '" role="img">' +
+    g + bars + hits + "</svg>";
+  el.querySelectorAll("rect[data-tip]").forEach(r => {
+    r.addEventListener("mousemove", ev => showTip(r.getAttribute("data-tip"), ev));
+    r.addEventListener("mouseleave", hideTip);
+  });
+}
+
+const KINDS = {
+  r1: { color: C.r1, label: "1º lembrete" },
+  r2: { color: C.r2, label: "2º lembrete" },
+  r3: { color: C.r3, label: "3º lembrete" },
+  owner: { color: "#857f72", label: "aviso interno" },
+  paid: { color: C.green, label: "paga" },
+};
+
+function fillFeed(events) {
+  const ul = document.getElementById("feed");
+  ul.innerHTML = "";
+  document.getElementById("e-feed").style.display = events.length ? "none" : "block";
+  for (const e of events) {
+    const k = KINDS[e.kind] || KINDS.owner;
+    const when = new Date(e.at).toLocaleString("pt-PT",
+      { timeZone: "Europe/Lisbon", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+    let text;
+    if (e.kind === "paid") {
+      text = "<b>Encomenda #" + e.orderNumber + " paga</b> · <span class='val'>" + eur(e.valueEur) + "</span>" +
+        (e.name ? " · " + e.name : "");
+    } else if (e.kind === "owner") {
+      text = "<span class='muted'>Aviso interno enviado (encomenda #" + e.orderNumber + " sem pagamento há 5 dias)</span>";
+    } else {
+      text = k.label + " → <b>#" + (e.orderNumber || "?") + "</b>" + (e.name ? " · " + e.name : "");
+    }
+    const li = document.createElement("li");
+    li.innerHTML = '<span class="when">' + when + '</span><span class="dot" style="background:' + k.color + '"></span><span>' + text + "</span>";
+    ul.appendChild(li);
+  }
+}
 
 function fillTable(id, emptyId, rows) {
   const tbody = document.querySelector("#" + id + " tbody");
@@ -222,6 +383,18 @@ async function refresh() {
 
     fillTable("t-recovered", "e-recovered", s.recoveredOrders);
     fillTable("t-awaiting", "e-awaiting", s.awaitingOrders);
+
+    // timelines: últimos 14 dias
+    const days = (s.daily || []).slice(-14);
+    barChart("c-reminders", days, [
+      { key: "r1", color: C.r1, label: "1º lembrete" },
+      { key: "r2", color: C.r2, label: "2º lembrete" },
+      { key: "r3", color: C.r3, label: "3º lembrete" },
+    ], (v, axis) => axis ? String(Math.round(v)) : String(v));
+    barChart("c-recovered", days, [
+      { key: "recoveredEur", color: C.green, label: "recuperado" },
+    ], (v, axis) => axis ? Math.round(v) + " €" : eur(v));
+    fillFeed(s.events || []);
 
     document.getElementById("updated").textContent =
       "atualizado às " + new Date(s.generatedAt).toLocaleTimeString("pt-PT",

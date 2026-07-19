@@ -138,12 +138,49 @@ interface StatsOrder {
   total_price?: string;
   currency?: string;
   created_at?: string;
+  updated_at?: string;
   customer?: {
     first_name?: string | null;
     last_name?: string | null;
     phone?: string | null;
   } | null;
   shipping_address?: { phone?: string | null } | null;
+}
+
+/**
+ * Data (aproximada) de pagamento de uma encomenda.
+ *
+ * Nota Multibanco: a transação "sale" muda para success MANTENDO o processed_at
+ * da criação — não serve como hora do pagamento. Confirmado com encomendas
+ * reais. Heurística: se houver uma transação de sucesso claramente posterior à
+ * criação (>10 min), usa-se essa; caso contrário usa-se o updated_at da
+ * encomenda, que na prática coincide com a passagem a "paga".
+ */
+async function fetchPaidAt(order: StatsOrder): Promise<string | null> {
+  const domain = process.env.SHOPIFY_STORE_DOMAIN;
+  const token = process.env.SHOPIFY_ADMIN_TOKEN;
+  const version = process.env.SHOPIFY_API_VERSION ?? "2024-10";
+  const createdMs = Date.parse(order.created_at ?? "") || 0;
+  try {
+    const res = await fetch(
+      `https://${domain}/admin/api/${version}/orders/${order.id}/transactions.json`,
+      { headers: { "X-Shopify-Access-Token": token! } },
+    );
+    if (!res.ok) throw new Error(String(res.status));
+    const json = (await res.json()) as {
+      transactions?: Array<{ status?: string; kind?: string; processed_at?: string }>;
+    };
+    const paid = (json.transactions ?? [])
+      .filter((t) => t.status === "success" && ["sale", "capture"].includes(t.kind ?? ""))
+      .map((t) => t.processed_at)
+      .filter((p): p is string => Boolean(p))
+      .sort();
+    const latest = paid[paid.length - 1];
+    if (latest && Date.parse(latest) > createdMs + 10 * 60_000) return latest;
+  } catch {
+    /* fallback abaixo */
+  }
+  return order.updated_at ?? null;
 }
 
 async function fetchOrdersSinceStart(): Promise<StatsOrder[]> {
@@ -156,7 +193,7 @@ async function fetchOrdersSinceStart(): Promise<StatsOrder[]> {
   let url: string | null =
     `https://${domain}/admin/api/${version}/orders.json?status=any&limit=250` +
     `&created_at_min=${encodeURIComponent(AUTOMATION_START)}` +
-    `&fields=id,order_number,name,financial_status,cancelled_at,total_price,currency,created_at,customer,shipping_address`;
+    `&fields=id,order_number,name,financial_status,cancelled_at,total_price,currency,created_at,updated_at,customer,shipping_address`;
 
   while (url) {
     const res: Response = await fetch(url, {
@@ -174,6 +211,25 @@ async function fetchOrdersSinceStart(): Promise<StatsOrder[]> {
 }
 
 // ── Cálculo final ────────────────────────────────────────────────────────────
+
+export interface DailyPoint {
+  /** YYYY-MM-DD (Europe/Lisbon) */
+  date: string;
+  r1: number;
+  r2: number;
+  r3: number;
+  owner: number;
+  recoveredCount: number;
+  recoveredEur: number;
+}
+
+export interface TimelineEvent {
+  at: string; // ISO
+  kind: ReminderType | "paid";
+  orderNumber: string | null;
+  name: string | null;
+  valueEur: number | null;
+}
 
 export interface DashboardStats {
   generatedAt: string;
@@ -198,6 +254,15 @@ export interface DashboardStats {
     valueEur: number;
     remindersReceived: number;
   }>;
+  /** Série diária para os gráficos (do 1º dia da automação até hoje). */
+  daily: DailyPoint[];
+  /** Últimos eventos (lembretes + pagamentos), mais recentes primeiro. */
+  events: TimelineEvent[];
+}
+
+/** Dia (YYYY-MM-DD) em hora de Portugal para um instante. */
+function lisbonDay(ms: number): string {
+  return new Date(ms).toLocaleDateString("sv-SE", { timeZone: "Europe/Lisbon" });
 }
 
 export async function computeStats(): Promise<DashboardStats> {
@@ -280,6 +345,65 @@ export async function computeStats(): Promise<DashboardStats> {
 
   const decided = recovered.length + awaiting.length;
 
+  // ── Timelines ──────────────────────────────────────────────────────────────
+  // Data de pagamento das recuperadas (até 30, em paralelo).
+  const paidAtByNumber = new Map<string, string>();
+  await Promise.all(
+    recovered.slice(0, 30).map(async (r) => {
+      const order = byNumber.get(r.orderNumber);
+      if (!order) return;
+      const paidAt = await fetchPaidAt(order);
+      if (paidAt) paidAtByNumber.set(r.orderNumber, paidAt);
+    }),
+  );
+
+  // Série diária contínua desde o arranque da automação até hoje (hora PT).
+  const dayMap = new Map<string, DailyPoint>();
+  const startMs = Date.parse(AUTOMATION_START);
+  for (let ms = startMs; lisbonDay(ms) <= lisbonDay(Date.now()); ms += 86_400_000) {
+    const d = lisbonDay(ms);
+    dayMap.set(d, { date: d, r1: 0, r2: 0, r3: 0, owner: 0, recoveredCount: 0, recoveredEur: 0 });
+  }
+  for (const r of reminders) {
+    const p = dayMap.get(lisbonDay(r.timestamp * 1000));
+    if (p) p[r.type]++;
+  }
+  for (const r of recovered) {
+    const paidAt = paidAtByNumber.get(r.orderNumber);
+    const p = paidAt ? dayMap.get(lisbonDay(Date.parse(paidAt))) : undefined;
+    if (p) {
+      p.recoveredCount++;
+      p.recoveredEur = Math.round((p.recoveredEur + r.valueEur) * 100) / 100;
+    }
+  }
+
+  // Feed de eventos: lembretes + pagamentos, mais recentes primeiro.
+  const nameByNumber = new Map<string, string>();
+  for (const [num, o] of byNumber) {
+    const n = [o.customer?.first_name, o.customer?.last_name].filter(Boolean).join(" ");
+    if (n) nameByNumber.set(num, n);
+  }
+  const events: TimelineEvent[] = [
+    ...reminders.map((r) => ({
+      at: new Date(r.timestamp * 1000).toISOString(),
+      kind: r.type as TimelineEvent["kind"],
+      orderNumber: r.orderNumber,
+      name: r.orderNumber ? nameByNumber.get(r.orderNumber) ?? null : null,
+      valueEur: null,
+    })),
+    ...recovered
+      .filter((r) => paidAtByNumber.has(r.orderNumber))
+      .map((r) => ({
+        at: new Date(paidAtByNumber.get(r.orderNumber)!).toISOString(),
+        kind: "paid" as const,
+        orderNumber: r.orderNumber,
+        name: r.name,
+        valueEur: r.valueEur,
+      })),
+  ]
+    .sort((a, b) => b.at.localeCompare(a.at))
+    .slice(0, 25);
+
   return {
     generatedAt: new Date().toISOString(),
     remindersSent: {
@@ -293,5 +417,7 @@ export async function computeStats(): Promise<DashboardStats> {
     recoveryRate: decided > 0 ? recovered.length / decided : 0,
     recoveredOrders: recovered,
     awaitingOrders: awaiting,
+    daily: [...dayMap.values()],
+    events,
   };
 }
