@@ -168,15 +168,16 @@ const PAGE = `<!DOCTYPE html>
   #gate-pass { width: 100%; padding: 12px 44px 12px 14px; border: 1px solid var(--line); border-radius: 6px;
     font: inherit; font-size: 15px; background: #fff; color: var(--ink); }
   #gate-pass:focus { outline: none; border-color: var(--gold); box-shadow: 0 0 0 3px rgba(171,140,82,.16); }
-  .pass-eye { position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
-    background: none; border: 0; cursor: pointer; font-size: 16px; padding: 6px 8px;
-    opacity: .55; line-height: 1; border-radius: 6px; }
-  .pass-eye:hover { opacity: 1; }
-  .pass-eye[aria-pressed="true"] { opacity: 1; }
-  #gate-form button { width: 100%; margin-top: 16px; padding: 12px; border: 0; border-radius: 6px;
+  .pass-eye { position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+    display: grid; place-items: center; width: 34px; height: 34px;
+    background: none; border: 0; cursor: pointer; color: var(--muted);
+    padding: 0; border-radius: 6px; transition: color .15s; }
+  .pass-eye:hover { color: var(--gold-deep); }
+  .pass-eye svg { width: 19px; height: 19px; display: block; }
+  #gate-form button[type="submit"] { width: 100%; margin-top: 16px; padding: 12px; border: 0; border-radius: 6px;
     background: var(--gold-deep); color: #fff; font: inherit; font-size: 14.5px; font-weight: 600;
     letter-spacing: .4px; cursor: pointer; transition: background .2s; }
-  #gate-form button:hover { background: #6a5228; }
+  #gate-form button[type="submit"]:hover { background: #6a5228; }
   #gate-error { color: var(--terracotta); font-size: 13px; margin-top: 14px; min-height: 18px; }
   .logout { background: none; border: 0; color: var(--muted); font: inherit; font-size: 12px;
     cursor: pointer; text-decoration: underline; letter-spacing: .3px; margin-left: 10px; }
@@ -192,7 +193,7 @@ const PAGE = `<!DOCTYPE html>
     <label for="gate-pass">Palavra-passe</label>
     <div class="pass-wrap">
       <input id="gate-pass" type="password" autocomplete="current-password" autofocus>
-      <button type="button" id="pass-toggle" class="pass-eye" aria-label="Mostrar palavra-passe" aria-pressed="false">👁</button>
+      <button type="button" id="pass-toggle" class="pass-eye" aria-label="Mostrar palavra-passe" aria-pressed="false"></button>
     </div>
     <button type="submit">Entrar</button>
     <div id="gate-error"></div>
@@ -554,14 +555,17 @@ gateForm.addEventListener("submit", e => {
 document.getElementById("logout").addEventListener("click", logout);
 window.addEventListener("resize", positionIndicator);
 
-// mostrar/ocultar palavra-passe
-document.getElementById("pass-toggle").addEventListener("click", () => {
+// mostrar/ocultar palavra-passe (ícones minimalistas em SVG)
+const EYE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 12S5 5.5 12 5.5 22.5 12 22.5 12 19 18.5 12 18.5 1.5 12 1.5 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_OFF = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18"/><path d="M10.6 5.7A9.6 9.6 0 0112 5.5c7 0 10.5 6.5 10.5 6.5a17 17 0 01-3.2 3.8M6.3 6.4A16.7 16.7 0 001.5 12S5 18.5 12 18.5a9.6 9.6 0 004-.9"/><path d="M9.9 9.9a3 3 0 004.2 4.2"/></svg>';
+const passToggle = document.getElementById("pass-toggle");
+passToggle.innerHTML = EYE;
+passToggle.addEventListener("click", () => {
   const show = gatePass.type === "password";
   gatePass.type = show ? "text" : "password";
-  const btn = document.getElementById("pass-toggle");
-  btn.setAttribute("aria-pressed", String(show));
-  btn.setAttribute("aria-label", show ? "Ocultar palavra-passe" : "Mostrar palavra-passe");
-  btn.textContent = show ? "🙈" : "👁";
+  passToggle.innerHTML = show ? EYE_OFF : EYE;
+  passToggle.setAttribute("aria-pressed", String(show));
+  passToggle.setAttribute("aria-label", show ? "Ocultar palavra-passe" : "Mostrar palavra-passe");
   gatePass.focus();
 });
 
