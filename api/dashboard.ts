@@ -81,8 +81,8 @@ const PAGE = `<!DOCTYPE html>
     background: var(--card); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
   .hero { padding: 30px 30px 32px; border-right: 1px solid var(--line);
     display: flex; flex-direction: column; justify-content: center; }
-  .side { display: grid; grid-template-rows: 1fr 1fr; }
-  .side .kpi { padding: 22px 28px; }
+  .side { display: grid; grid-template-rows: repeat(3, 1fr); }
+  .side .kpi { padding: 18px 28px; }
   .side .kpi + .kpi { border-top: 1px solid var(--line); }
   .kpi-rule { width: 30px; height: 2px; background: var(--gold); margin: 10px 0 12px; border-radius: 2px; }
   .num {
@@ -90,7 +90,8 @@ const PAGE = `<!DOCTYPE html>
     letter-spacing: -1px; font-variant-numeric: tabular-nums;
   }
   .hero .num { font-size: 68px; color: var(--gold-deep); }
-  .side .num { font-size: 40px; color: var(--ink); }
+  .side .num { font-size: 38px; color: var(--ink); }
+  .side .num.rate { color: var(--olive); }
   .delta { margin-top: 12px; font-size: 12.5px; color: var(--muted); }
   .delta .arrow { font-weight: 700; }
   .delta.up { color: var(--olive); } .delta.down { color: var(--terracotta); }
@@ -221,6 +222,11 @@ const PAGE = `<!DOCTYPE html>
       <div class="num" id="k-recovered">–</div>
       <div class="delta" id="d-recovered"></div>
     </div>
+    <div class="kpi">
+      <div class="eyebrow">Taxa de recuperação</div>
+      <div class="num rate" id="k-rate">–</div>
+      <div class="kpi-sub" id="s-rate"></div>
+    </div>
   </div>
 </div>
 
@@ -321,20 +327,43 @@ function countUp(el, to, fmt) {
 
 // ── janelas ──
 function within(iso, hours, end) {
-  const t = Date.parse(iso);
+  return withinMs(Date.parse(iso), hours, end);
+}
+function withinMs(t, hours, end) {
   if (t > end) return false;
   return hours == null || t > end - hours * HOUR;
 }
-function aggregate(hours, end) {
+/** 1º lembrete (ms) por encomenda + conjunto de recuperadas — base da taxa. */
+function cohortIndex() {
+  const first = {};
+  for (const r of DATA.reminderEvents) {
+    if (r.type === "owner" || !r.orderNumber) continue;
+    const t = Date.parse(r.at);
+    if (first[r.orderNumber] == null || t < first[r.orderNumber]) first[r.orderNumber] = t;
+  }
+  const recSet = new Set(DATA.recoveryEvents.map(r => r.orderNumber));
+  return { first, recSet };
+}
+function aggregate(hours, end, coh) {
   const rem = DATA.reminderEvents.filter(r => r.type !== "owner" && within(r.at, hours, end));
   const rec = DATA.recoveryEvents.filter(r => within(r.at, hours, end));
   const by = { r1: 0, r2: 0, r3: 0 };
   rem.forEach(r => { if (by[r.type] != null) by[r.type]++; });
+  // Taxa de recuperação: das encomendas cujo 1º lembrete caiu neste período,
+  // quantas já foram pagas. (coorte por 1º lembrete = atribuição justa.)
+  let cohort = 0, cohortRec = 0;
+  for (const num in coh.first) {
+    if (!withinMs(coh.first[num], hours, end)) continue;
+    cohort++;
+    if (coh.recSet.has(num)) cohortRec++;
+  }
   return {
     sent: rem.length, by,
     recovered: rec.length,
     value: rec.reduce((s, r) => s + r.valueEur, 0),
     recList: rec,
+    cohort, cohortRec,
+    rate: cohort ? cohortRec / cohort : null,
   };
 }
 function deltaHtml(cur, prev, hours) {
@@ -380,8 +409,9 @@ function fillTable(id, emptyId, rows) {
 
 function render() {
   const end = Date.now();
-  const cur = aggregate(SEL, end);
-  const prev = SEL == null ? null : aggregate(SEL, end - SEL * HOUR);
+  const coh = cohortIndex();
+  const cur = aggregate(SEL, end, coh);
+  const prev = SEL == null ? null : aggregate(SEL, end - SEL * HOUR, coh);
   const wl = (WINDOWS.find(w => w.h === SEL) || {}).label;
   document.getElementById("range-note").innerHTML =
     SEL == null ? "Desde o início da automação" : "Últimas <span>" + wl + "</span>";
@@ -389,9 +419,16 @@ function render() {
   countUp(document.getElementById("k-value"), cur.value, eur);
   countUp(document.getElementById("k-sent"), cur.sent, v => String(Math.round(v)));
   countUp(document.getElementById("k-recovered"), cur.recovered, v => String(Math.round(v)));
+  countUp(document.getElementById("k-rate"), cur.rate == null ? 0 : cur.rate * 100, v => Math.round(v) + "%");
 
   setDelta("d-value", cur.value, prev && prev.value, SEL, true);
   setDelta("d-recovered", cur.recovered, prev && prev.recovered, SEL, true);
+
+  const rateEl = document.getElementById("s-rate");
+  rateEl.innerHTML = cur.cohort
+    ? "<b>" + cur.cohortRec + "</b> de <b>" + cur.cohort + "</b> encomendas com lembrete " +
+      (SEL == null ? "" : "neste período ") + "já foram pagas"
+    : "sem encomendas com lembrete neste período";
 
   document.getElementById("s-value").innerHTML = cur.recovered
     ? "de <b>" + cur.recovered + "</b> encomenda" + (cur.recovered > 1 ? "s" : "") + " paga" + (cur.recovered > 1 ? "s" : "") + " após lembrete"
