@@ -152,9 +152,42 @@ const PAGE = `<!DOCTYPE html>
     .hide-sm { display: none; }
   }
   @media (prefers-reduced-motion: reduce) { .seg-ind { transition: none; } }
+  /* ── login ── */
+  #gate { position: fixed; inset: 0; background: var(--paper); display: grid; place-items: center; z-index: 100; padding: 24px; }
+  #gate-form { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    padding: 36px 30px 30px; width: 100%; max-width: 350px; text-align: center; box-shadow: 0 8px 34px rgba(125,98,48,.09); }
+  .gate-brand { font-family: var(--serif); font-weight: 700; font-size: 32px; }
+  .gate-sub { color: var(--gold-deep); font-size: 11px; text-transform: uppercase; letter-spacing: 2.2px; margin: 5px 0 26px; }
+  .gate-rule { width: 34px; height: 2px; background: var(--gold); margin: 0 auto 24px; border-radius: 2px; }
+  #gate-form label { display: block; text-align: left; font-size: 11px; color: var(--muted);
+    margin-bottom: 7px; text-transform: uppercase; letter-spacing: 1.2px; }
+  #gate-pass { width: 100%; padding: 12px 14px; border: 1px solid var(--line); border-radius: 6px;
+    font: inherit; font-size: 15px; background: #fff; color: var(--ink); }
+  #gate-pass:focus { outline: none; border-color: var(--gold); box-shadow: 0 0 0 3px rgba(171,140,82,.16); }
+  #gate-form button { width: 100%; margin-top: 16px; padding: 12px; border: 0; border-radius: 6px;
+    background: var(--gold-deep); color: #fff; font: inherit; font-size: 14.5px; font-weight: 600;
+    letter-spacing: .4px; cursor: pointer; transition: background .2s; }
+  #gate-form button:hover { background: #6a5228; }
+  #gate-error { color: var(--terracotta); font-size: 13px; margin-top: 14px; min-height: 18px; }
+  .logout { background: none; border: 0; color: var(--muted); font: inherit; font-size: 12px;
+    cursor: pointer; text-decoration: underline; letter-spacing: .3px; margin-left: 10px; }
+  .logout:hover { color: var(--gold-deep); }
 </style>
 </head>
 <body>
+<div id="gate">
+  <form id="gate-form" autocomplete="on">
+    <div class="gate-brand">Sofia Tavira</div>
+    <div class="gate-sub">Painel de recuperação Multibanco</div>
+    <div class="gate-rule"></div>
+    <label for="gate-pass">Palavra-passe</label>
+    <input id="gate-pass" type="password" autocomplete="current-password" autofocus>
+    <button type="submit">Entrar</button>
+    <div id="gate-error"></div>
+  </form>
+</div>
+
+<div id="app" style="display:none">
 <header>
   <div class="wordmark">Sofia Tavira</div>
   <div class="eyebrow">Recuperação de encomendas Multibanco</div>
@@ -232,10 +265,13 @@ const PAGE = `<!DOCTYPE html>
 </section>
 
 <div id="updated">a carregar…</div>
-<footer>Sofia Tavira <span class="h">&#128155;</span> recuperação automática de encomendas Multibanco</footer>
+<footer>Sofia Tavira <span class="h">&#128155;</span> recuperação automática de encomendas Multibanco<button class="logout" id="logout" type="button">sair</button></footer>
+</div>
 
 <script>
-const KEY = new URLSearchParams(location.search).get("key") || "";
+// palavra-passe: guardada no dispositivo (ou vinda do link ?key= por compatibilidade)
+let PASS = localStorage.getItem("st_pass") || new URLSearchParams(location.search).get("key") || "";
+let started = false;
 const RM = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const HOUR = 3600e3;
 const eur = v => v.toLocaleString("pt-PT", { style: "currency", currency: "EUR" });
@@ -397,15 +433,19 @@ function render() {
   fillTable("t-awaiting", "e-awaiting", DATA.awaitingOrders);
 }
 
+function markUpdated() {
+  document.getElementById("updated").textContent = "atualizado às " +
+    new Date(DATA.generatedAt).toLocaleTimeString("pt-PT", { timeZone: "Europe/Lisbon", hour: "2-digit", minute: "2-digit", second: "2-digit" }) +
+    " · atualiza automaticamente";
+}
+
+// atualização periódica (já autenticado)
 async function refresh() {
   try {
-    const res = await fetch("/api/stats?key=" + encodeURIComponent(KEY));
-    if (!res.ok) throw new Error(res.status === 401 ? "Chave de acesso inválida — confirma o link." : "Erro " + res.status + " ao obter dados.");
-    DATA = await res.json();
-    render();
-    document.getElementById("updated").textContent = "atualizado às " +
-      new Date(DATA.generatedAt).toLocaleTimeString("pt-PT", { timeZone: "Europe/Lisbon", hour: "2-digit", minute: "2-digit", second: "2-digit" }) +
-      " · atualiza automaticamente";
+    const res = await fetch("/api/stats?key=" + encodeURIComponent(PASS));
+    if (res.status === 401) { logout(); return; }        // palavra-passe revogada
+    if (!res.ok) throw new Error("Erro " + res.status + " ao obter dados.");
+    DATA = await res.json(); render(); markUpdated();
     document.getElementById("error").style.display = "none";
   } catch (err) {
     const el = document.getElementById("error");
@@ -413,32 +453,63 @@ async function refresh() {
   }
 }
 
-// posicionar indicador no arranque + em resize
-window.addEventListener("load", () => {
+// ── login ──
+const gate = document.getElementById("gate");
+const app = document.getElementById("app");
+const gateForm = document.getElementById("gate-form");
+const gatePass = document.getElementById("gate-pass");
+const gateError = document.getElementById("gate-error");
+
+function positionIndicator() {
   const active = seg.querySelector('button[aria-selected="true"]');
   if (active) moveIndicator(active);
+}
+function showApp() {
+  gate.style.display = "none"; app.style.display = "";
+  positionIndicator();
+  if (!started) { started = true; setInterval(refresh, 30000); }
+}
+function showGate(msg) {
+  app.style.display = "none"; gate.style.display = "grid";
+  gateError.textContent = msg || "";
+  gatePass.value = ""; gatePass.focus();
+}
+function logout() {
+  localStorage.removeItem("st_pass"); PASS = ""; started = false;
+  showGate("");
+}
+
+async function tryAuth(pass, fromForm) {
+  try {
+    const res = await fetch("/api/stats?key=" + encodeURIComponent(pass));
+    if (res.status === 401) { showGate(fromForm ? "Palavra-passe incorreta." : ""); return; }
+    if (!res.ok) { if (fromForm) gateError.textContent = "Erro " + res.status + ". Tenta novamente."; return; }
+    PASS = pass; localStorage.setItem("st_pass", pass);
+    DATA = await res.json(); showApp(); render(); markUpdated();
+  } catch (e) {
+    if (fromForm) gateError.textContent = "Sem ligação. Tenta novamente.";
+    else showGate("");
+  }
+}
+
+gateForm.addEventListener("submit", e => {
+  e.preventDefault();
+  const v = gatePass.value.trim();
+  if (v) { gateError.textContent = "a entrar…"; tryAuth(v, true); }
 });
-window.addEventListener("resize", () => {
-  const active = seg.querySelector('button[aria-selected="true"]');
-  if (active) moveIndicator(active);
-});
-refresh();
-setInterval(refresh, 30000);
+document.getElementById("logout").addEventListener("click", logout);
+window.addEventListener("resize", positionIndicator);
+
+// arranque: se já houver palavra-passe guardada, entra direto; senão mostra o login.
+if (PASS) tryAuth(PASS, false); else showGate("");
 </script>
 </body>
 </html>`;
 
-export default function handler(req: Req, res: Res): void {
-  const secret = process.env.DASHBOARD_SECRET;
-  const url = new URL(req.url ?? "/", "http://x");
-  if (!secret || url.searchParams.get("key") !== secret) {
-    res.status(401);
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(
-      "<!DOCTYPE html><meta charset='utf-8'><body style=\"font-family:Georgia,serif;background:#f6f3ec;color:#2a2620;display:grid;place-items:center;height:100vh;text-align:center\"><div><h2 style='letter-spacing:1px'>Sofia Tavira</h2><p style='color:#7d6230'>🔒 Acesso restrito — pede o link correto do dashboard.</p></div>",
-    );
-    return;
-  }
+export default function handler(_req: Req, res: Res): void {
+  // A página (só o formulário de login + UI) é pública; os DADOS ficam
+  // protegidos em /api/stats, que exige a palavra-passe. Sem palavra-passe
+  // correta, o dashboard nunca chega a receber números.
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.setHeader("Cache-Control", "no-store");
   res.status(200);
