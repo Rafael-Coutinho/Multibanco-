@@ -56,6 +56,48 @@ function config() {
 }
 
 /**
+ * Verifica no histórico do WhatsApp se já foi enviada, para este número, uma
+ * mensagem que contém `#<orderNumber>` E a `marker` (frase distintiva do
+ * lembrete). Serve para NUNCA duplicar um lembrete já enviado.
+ *
+ * Em caso de erro/dúvida devolve `false` (não bloqueia o envio) — a garantia
+ * anti-duplicado é "best effort": se não conseguirmos confirmar, preferimos
+ * enviar a arriscar não avisar a cliente.
+ */
+export async function reminderAlreadySent(
+  number: string,
+  orderNumber: string,
+  marker: string,
+): Promise<boolean> {
+  try {
+    const { baseUrl, instance, apiKey } = config();
+    const res = await fetch(`${baseUrl}/chat/findMessages/${instance}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", apikey: apiKey },
+      body: JSON.stringify({
+        where: { key: { remoteJid: `${number}@s.whatsapp.net`, fromMe: true } },
+      }),
+    });
+    if (!res.ok) return false;
+    const json = (await res.json()) as {
+      messages?: { records?: Array<{ message?: Record<string, unknown> }> };
+    };
+    const records = json.messages?.records ?? [];
+    const needle = `#${orderNumber}`;
+    return records.some((r) => {
+      const m = (r.message ?? {}) as {
+        conversation?: string;
+        extendedTextMessage?: { text?: string };
+      };
+      const t = m.conversation ?? m.extendedTextMessage?.text ?? "";
+      return t.includes(needle) && t.includes(marker);
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Envia uma mensagem de texto. `number` deve já estar normalizado (só dígitos
  * com indicativo). Lança erro se a EvolutionAPI responder com estado != 2xx.
  */

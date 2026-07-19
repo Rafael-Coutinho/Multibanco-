@@ -9,7 +9,7 @@ import {
   type ShopifyOrder,
   type MultibancoData,
 } from "../lib/shopify.js";
-import { normalizePhone, sendText } from "../lib/evolution.js";
+import { normalizePhone, sendText, reminderAlreadySent } from "../lib/evolution.js";
 import {
   reminder1,
   reminder2,
@@ -44,6 +44,14 @@ const RENDERERS: Record<ReminderKind, (d: OrderMessageData) => string> = {
   reminder1,
   reminder2,
   reminder3,
+};
+
+// Frase distintiva de cada lembrete — usada para detetar (no histórico do
+// WhatsApp) se aquele lembrete já foi enviado, e assim nunca duplicar.
+const MARKERS: Record<ReminderKind, string> = {
+  reminder1: "Somos a Sofia Tavira",
+  reminder2: "há já 2 dias",
+  reminder3: "ÚLTIMO AVISO",
 };
 
 /**
@@ -185,6 +193,15 @@ async function processReminder(
     valor: mb.data.valor,
   };
 
+  // Blindagem anti-duplicado: se este lembrete já saiu para esta encomenda, salta.
+  if (await reminderAlreadySent(phone, data.numero, MARKERS[kind])) {
+    logger.info(`${kind} já tinha sido enviado para #${data.numero} — a saltar (evita duplicado).`, {
+      orderId,
+      phone,
+    });
+    return { stop: false };
+  }
+
   await safeSend(phone, RENDERERS[kind](data), kind, orderId);
   return { stop: false };
 }
@@ -199,9 +216,18 @@ async function notifyOwner(order: ShopifyOrder): Promise<void> {
     return;
   }
 
+  const numero = getOrderNumber(order);
+  // Blindagem anti-duplicado: se o aviso desta encomenda já saiu, salta.
+  if (await reminderAlreadySent(ownerNumber, numero, "não paga")) {
+    logger.info(`Aviso ao dono da #${numero} já tinha sido enviado — a saltar.`, {
+      orderId: order.id,
+    });
+    return;
+  }
+
   const rawPhone = getCustomerPhone(order);
   const text = ownerAlert({
-    numero: getOrderNumber(order),
+    numero,
     nome: getCustomerName(order),
     telefone: normalizePhone(rawPhone) ?? rawPhone ?? "",
   });
