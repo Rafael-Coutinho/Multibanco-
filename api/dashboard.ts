@@ -134,6 +134,9 @@ const PAGE = `<!DOCTYPE html>
     border-radius: 999px; font-size: 12px; background: var(--gold-soft); color: var(--gold-deep); font-weight: 600; }
   .pill.stage { background: #e2ecd8; color: var(--olive); }
   .stage-txt { color: var(--olive); font-weight: 600; }
+  .fail-txt { color: var(--terracotta); font-weight: 600; }
+  .fail-note { margin-top: 8px; font-size: 12.5px; color: var(--terracotta); font-weight: 600; }
+  .fail-note:empty { display: none; }
   .empty { color: var(--muted); padding: 22px 20px; font-size: 14px; font-style: italic; text-align: center; }
   #error { display: none; background: #f7e8e6; border: 1px solid #e0c2bd; color: #ac2828;
     padding: 12px 16px; border-radius: 4px; margin: 0 0 18px; text-align: center; }
@@ -225,9 +228,10 @@ const PAGE = `<!DOCTYPE html>
   </div>
   <div class="side">
     <div class="kpi">
-      <div class="eyebrow">Lembretes enviados</div>
+      <div class="eyebrow">Lembretes entregues</div>
       <div class="num" id="k-sent">–</div>
       <div class="kpi-sub"><span class="brk" id="s-sent"></span></div>
+      <div class="fail-note" id="s-failed"></div>
     </div>
     <div class="kpi">
       <div class="eyebrow">Encomendas recuperadas</div>
@@ -345,11 +349,11 @@ function withinMs(t, hours, end) {
   if (t > end) return false;
   return hours == null || t > end - hours * HOUR;
 }
-/** 1º lembrete (ms) por encomenda + conjunto de recuperadas — base da taxa. */
+/** 1º lembrete ENTREGUE (ms) por encomenda + conjunto de recuperadas. */
 function cohortIndex() {
   const first = {};
   for (const r of DATA.reminderEvents) {
-    if (r.type === "owner" || !r.orderNumber) continue;
+    if (r.type === "owner" || !r.orderNumber || r.delivery !== "delivered") continue;
     const t = Date.parse(r.at);
     if (first[r.orderNumber] == null || t < first[r.orderNumber]) first[r.orderNumber] = t;
   }
@@ -357,7 +361,9 @@ function cohortIndex() {
   return { first, recSet };
 }
 function aggregate(hours, end, coh) {
-  const rem = DATA.reminderEvents.filter(r => r.type !== "owner" && within(r.at, hours, end));
+  const all = DATA.reminderEvents.filter(r => r.type !== "owner" && within(r.at, hours, end));
+  const rem = all.filter(r => r.delivery === "delivered"); // só entregues contam como enviados
+  const failed = all.filter(r => r.delivery === "failed").length;
   const rec = DATA.recoveryEvents.filter(r => within(r.at, hours, end));
   const by = { r1: 0, r2: 0, r3: 0 };
   rem.forEach(r => { if (by[r.type] != null) by[r.type]++; });
@@ -370,7 +376,7 @@ function aggregate(hours, end, coh) {
     if (coh.recSet.has(num)) cohortRec++;
   }
   return {
-    sent: rem.length, by,
+    sent: rem.length, failed, by,
     recovered: rec.length,
     value: rec.reduce((s, r) => s + r.valueEur, 0),
     recList: rec,
@@ -453,6 +459,9 @@ function render() {
     : "ainda nenhuma paga neste período";
   document.getElementById("s-sent").innerHTML =
     "<span>1º <b>" + cur.by.r1 + "</b></span><span>2º <b>" + cur.by.r2 + "</b></span><span>3º <b>" + cur.by.r3 + "</b></span>";
+  document.getElementById("s-failed").innerHTML = cur.failed
+    ? "⚠ <b>" + cur.failed + "</b> não entregue" + (cur.failed > 1 ? "s" : "") + " (WhatsApp)"
+    : "";
 
   // snapshot (estado atual — não temporal)
   const pend = DATA.awaitingOrders.reduce((s, o) => s + o.valueEur, 0);
@@ -461,7 +470,7 @@ function render() {
 
   // feed (período)
   const feedEvents = [
-    ...DATA.reminderEvents.filter(r => within(r.at, SEL, end)).map(r => ({ at: r.at, kind: r.type, orderNumber: r.orderNumber, name: r.name, valueEur: null })),
+    ...DATA.reminderEvents.filter(r => within(r.at, SEL, end)).map(r => ({ at: r.at, kind: r.type, orderNumber: r.orderNumber, name: r.name, valueEur: null, delivery: r.delivery })),
     ...cur.recList.map(r => ({ at: r.at, kind: "paid", orderNumber: r.orderNumber, name: r.name, valueEur: r.valueEur, reminders: r.remindersReceived })),
   ].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 30);
   const ul = document.getElementById("feed"); ul.innerHTML = "";
@@ -470,14 +479,16 @@ function render() {
     feedEvents.length ? feedEvents.length + " eventos" : "";
   for (const e of feedEvents) {
     const k = KINDS[e.kind] || KINDS.owner;
+    const failed = e.delivery === "failed";
+    const dotColor = failed ? "#bf6a45" : k.c;
     const when = new Date(e.at).toLocaleString("pt-PT", { timeZone: "Europe/Lisbon", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
     let text;
     if (e.kind === "paid") text = "<b>Encomenda #" + e.orderNumber + " paga</b> · <span class='val'>" + eur(e.valueEur) + "</span> · <span class='stage-txt'>após " + stageLabel(e.reminders) + " lembrete</span>" + (e.name ? " · " + e.name : "");
-    else if (e.kind === "owner") text = "<span class='muted'>Aviso interno · encomenda #" + e.orderNumber + " sem pagamento</span>";
-    else text = k.label + " &rarr; <b>#" + (e.orderNumber || "?") + "</b>" + (e.name ? " · " + e.name : "");
+    else if (e.kind === "owner") text = "<span class='muted'>Aviso interno · encomenda #" + e.orderNumber + "</span>" + (failed ? " · <span class='fail-txt'>não entregue</span>" : "");
+    else text = k.label + " &rarr; <b>#" + (e.orderNumber || "?") + "</b>" + (e.name ? " · " + e.name : "") + (failed ? " · <span class='fail-txt'>não entregue</span>" : "");
     const li = document.createElement("li");
     li.innerHTML = '<span class="when">' + when + '</span>' +
-      '<span class="body"><span class="dot" style="background:' + k.c + '"></span><span>' + text + "</span></span>";
+      '<span class="body"><span class="dot" style="background:' + dotColor + '"></span><span>' + text + "</span></span>";
     ul.appendChild(li);
   }
 

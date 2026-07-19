@@ -26,6 +26,25 @@ interface EvoRecord {
     extendedTextMessage?: { text?: string };
   };
   messageTimestamp?: number;
+  status?: string;
+  MessageUpdate?: Array<{ status?: string }>;
+}
+
+/** Estado de entrega real da mensagem no WhatsApp. */
+export type Delivery = "delivered" | "pending" | "failed";
+
+function deliveryOf(rec: EvoRecord): Delivery {
+  const upd = rec.MessageUpdate ?? [];
+  const last = (upd.length ? upd[upd.length - 1]?.status : rec.status) ?? "";
+  const s = last.toUpperCase();
+  if (s === "DELIVERY_ACK" || s === "READ" || s === "PLAYED") return "delivered";
+  if (s === "ERROR") return "failed";
+  return "pending"; // SERVER_ACK, PENDING ou sem confirmação
+}
+
+const DELIVERY_RANK: Record<Delivery, number> = { delivered: 2, pending: 1, failed: 0 };
+function bestDelivery(a: Delivery, b: Delivery): Delivery {
+  return DELIVERY_RANK[a] >= DELIVERY_RANK[b] ? a : b;
 }
 
 function evoConfig() {
@@ -78,6 +97,7 @@ export interface SentReminder {
   orderNumber: string | null;
   phone: string | null; // dígitos, do remoteJid
   timestamp: number; // epoch segundos
+  delivery: Delivery; // entregue / pendente / falhada (estado real no WhatsApp)
 }
 
 function textOf(rec: EvoRecord): string {
@@ -114,14 +134,17 @@ export function extractReminders(records: EvoRecord[]): SentReminder[] {
     const phoneMatch = jid.match(/^(\d+)@s\.whatsapp\.net$/);
     const phone = phoneMatch ? phoneMatch[1] : null;
 
+    const delivery = deliveryOf(rec);
     const dedupKey = orderNumber ? `${orderNumber}:${hit.type}` : `anon:${anon++}`;
     const existing = byKey.get(dedupKey);
     if (existing) {
-      // Mantém o registo mais completo (com telefone real) e o ts mais antigo.
+      // Mantém o registo mais completo (com telefone real), o ts mais antigo e o
+      // melhor estado de entrega entre as cópias (@lid / @s.whatsapp.net).
       existing.phone = existing.phone ?? phone;
       existing.timestamp = Math.min(existing.timestamp, ts);
+      existing.delivery = bestDelivery(existing.delivery, delivery);
     } else {
-      byKey.set(dedupKey, { type: hit.type, orderNumber, phone, timestamp: ts });
+      byKey.set(dedupKey, { type: hit.type, orderNumber, phone, timestamp: ts, delivery });
     }
   }
   return [...byKey.values()];
@@ -212,12 +235,13 @@ async function fetchOrdersSinceStart(): Promise<StatsOrder[]> {
 
 // ── Cálculo final ────────────────────────────────────────────────────────────
 
-/** Um lembrete enviado, com o momento exato — o filtro por período é feito no cliente. */
+/** Um lembrete, com o momento exato e o estado de entrega real no WhatsApp. */
 export interface ReminderEvent {
   at: string; // ISO
   type: ReminderType;
   orderNumber: string | null;
   name: string | null;
+  delivery: Delivery; // "delivered" | "pending" | "failed"
 }
 
 /** Uma encomenda recuperada, datada pelo momento do pagamento. */
@@ -287,13 +311,16 @@ export async function computeStats(): Promise<DashboardStats> {
     if (n) nameByNumber.set(num, n);
   }
 
-  // Agrupar lembretes de cliente (r1/r2/r3) por encomenda
+  // Agrupar lembretes de cliente (r1/r2/r3) por encomenda — SÓ os ENTREGUES.
+  // Um lembrete que falhou a entrega não conta como "recebido": a cliente não o
+  // viu, por isso não entra nas recuperadas nem na taxa de recuperação.
   const perOrder = new Map<
     string,
     { count: number; phone: string | null; lastTs: number }
   >();
   for (const r of reminders) {
     if (r.type === "owner" || !r.orderNumber) continue;
+    if (r.delivery !== "delivered") continue;
     const cur = perOrder.get(r.orderNumber) ?? { count: 0, phone: null, lastTs: 0 };
     cur.count++;
     cur.phone = cur.phone ?? r.phone;
@@ -350,6 +377,7 @@ export async function computeStats(): Promise<DashboardStats> {
     type: r.type,
     orderNumber: r.orderNumber,
     name: r.orderNumber ? nameByNumber.get(r.orderNumber) ?? null : null,
+    delivery: r.delivery,
   }));
 
   reminderEvents.sort((a, b) => b.at.localeCompare(a.at));
