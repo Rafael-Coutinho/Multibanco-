@@ -212,57 +212,61 @@ async function fetchOrdersSinceStart(): Promise<StatsOrder[]> {
 
 // ── Cálculo final ────────────────────────────────────────────────────────────
 
-export interface DailyPoint {
-  /** YYYY-MM-DD (Europe/Lisbon) */
-  date: string;
-  r1: number;
-  r2: number;
-  r3: number;
-  owner: number;
-  recoveredCount: number;
-  recoveredEur: number;
-}
-
-export interface TimelineEvent {
+/** Um lembrete enviado, com o momento exato — o filtro por período é feito no cliente. */
+export interface ReminderEvent {
   at: string; // ISO
-  kind: ReminderType | "paid";
+  type: ReminderType;
   orderNumber: string | null;
   name: string | null;
-  valueEur: number | null;
+}
+
+/** Uma encomenda recuperada, datada pelo momento do pagamento. */
+export interface RecoveryEvent {
+  at: string; // ISO — momento do pagamento
+  orderNumber: string;
+  name: string;
+  phone: string | null;
+  valueEur: number;
+  remindersReceived: number;
+}
+
+/** Uma encomenda com lembrete ainda por pagar (estado atual, não temporal). */
+export interface AwaitingOrder {
+  orderNumber: string;
+  name: string;
+  phone: string | null;
+  valueEur: number;
+  remindersReceived: number;
+  lastReminderAt: string;
 }
 
 export interface DashboardStats {
   generatedAt: string;
-  remindersSent: { r1: number; r2: number; r3: number; owner: number; total: number };
-  ordersReminded: number;
-  ordersRecovered: number;
-  recoveredValueEur: number;
-  pendingValueEur: number; // valor ainda por pagar das encomendas com lembrete
-  recoveryRate: number; // 0..1 sobre encomendas com lembrete e desfecho conhecido
-  recoveredOrders: Array<{
-    orderNumber: string;
-    name: string;
-    phone: string | null;
-    valueEur: number;
-    remindersReceived: number;
-    lastReminderAt: string;
-  }>;
-  awaitingOrders: Array<{
-    orderNumber: string;
-    name: string;
-    phone: string | null;
-    valueEur: number;
-    remindersReceived: number;
-  }>;
-  /** Série diária para os gráficos (do 1º dia da automação até hoje). */
-  daily: DailyPoint[];
-  /** Últimos eventos (lembretes + pagamentos), mais recentes primeiro. */
-  events: TimelineEvent[];
+  automationStart: string;
+  /** Todos os lembretes (1º/2º/3º/aviso) com data — para filtrar por período no cliente. */
+  reminderEvents: ReminderEvent[];
+  /** Todas as encomendas recuperadas, datadas pelo pagamento. */
+  recoveryEvents: RecoveryEvent[];
+  /** Encomendas com lembrete ainda por pagar (estado atual). */
+  awaitingOrders: AwaitingOrder[];
 }
 
-/** Dia (YYYY-MM-DD) em hora de Portugal para um instante. */
-function lisbonDay(ms: number): string {
-  return new Date(ms).toLocaleDateString("sv-SE", { timeZone: "Europe/Lisbon" });
+/** map com limite de concorrência (para não rebentar limites da Shopify). */
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let i = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) || 1 }, async () => {
+    while (i < items.length) {
+      const idx = i++;
+      out[idx] = await fn(items[idx]);
+    }
+  });
+  await Promise.all(workers);
+  return out;
 }
 
 export async function computeStats(): Promise<DashboardStats> {
@@ -272,21 +276,23 @@ export async function computeStats(): Promise<DashboardStats> {
   ]);
   const reminders = extractReminders(records);
 
-  // Índice de encomendas por número visível
+  // Índice de encomendas por número visível + nomes
   const byNumber = new Map<string, StatsOrder>();
+  const nameByNumber = new Map<string, string>();
   for (const o of orders) {
     const num = o.order_number != null ? String(o.order_number) : o.name?.replace(/^#/, "");
-    if (num) byNumber.set(num, o);
+    if (!num) continue;
+    byNumber.set(num, o);
+    const n = [o.customer?.first_name, o.customer?.last_name].filter(Boolean).join(" ");
+    if (n) nameByNumber.set(num, n);
   }
 
-  // Agrupar lembretes (só r1/r2/r3, dirigidos a clientes) por encomenda
+  // Agrupar lembretes de cliente (r1/r2/r3) por encomenda
   const perOrder = new Map<
     string,
     { count: number; phone: string | null; lastTs: number }
   >();
-  const counts = { r1: 0, r2: 0, r3: 0, owner: 0 };
   for (const r of reminders) {
-    counts[r.type]++;
     if (r.type === "owner" || !r.orderNumber) continue;
     const cur = perOrder.get(r.orderNumber) ?? { count: 0, phone: null, lastTs: 0 };
     cur.count++;
@@ -295,129 +301,66 @@ export async function computeStats(): Promise<DashboardStats> {
     perOrder.set(r.orderNumber, cur);
   }
 
-  const recovered: DashboardStats["recoveredOrders"] = [];
-  const awaiting: DashboardStats["awaitingOrders"] = [];
-  let recoveredValue = 0;
-  let pendingValue = 0;
-
+  // Classificar cada encomenda com lembrete: recuperada (paga) vs à espera.
+  const recoveredNumbers: string[] = [];
+  const awaiting: AwaitingOrder[] = [];
   for (const [orderNumber, info] of perOrder) {
     const order = byNumber.get(orderNumber);
-    if (!order) continue; // encomenda fora da janela — ignorar
+    if (!order) continue;
     const value = parseFloat(order.total_price ?? "0") || 0;
-    const name = [order.customer?.first_name, order.customer?.last_name]
-      .filter(Boolean)
-      .join(" ") || "—";
-    // Fallback do telefone: se o WhatsApp só guardou o ID interno (@lid),
-    // usa o telefone registado na Shopify.
+    const name = nameByNumber.get(orderNumber) || "—";
     const shopifyPhone = (order.customer?.phone || order.shipping_address?.phone || "")
       .replace(/[^\d]/g, "") || null;
     const phone = info.phone ?? shopifyPhone;
     const paid =
-      order.financial_status === "paid" ||
-      order.financial_status === "partially_paid";
+      order.financial_status === "paid" || order.financial_status === "partially_paid";
     const cancelled = Boolean(order.cancelled_at) ||
       ["voided", "refunded"].includes(order.financial_status ?? "");
 
     if (paid) {
-      recovered.push({
-        orderNumber,
-        name,
-        phone,
-        valueEur: value,
+      recoveredNumbers.push(orderNumber);
+    } else if (!cancelled) {
+      awaiting.push({
+        orderNumber, name, phone, valueEur: value,
         remindersReceived: info.count,
         lastReminderAt: new Date(info.lastTs * 1000).toISOString(),
       });
-      recoveredValue += value;
-    } else if (!cancelled) {
-      awaiting.push({
-        orderNumber,
-        name,
-        phone,
-        valueEur: value,
-        remindersReceived: info.count,
-      });
-      pendingValue += value;
     }
   }
 
-  recovered.sort((a, b) => b.lastReminderAt.localeCompare(a.lastReminderAt));
+  // Momento do pagamento de cada recuperada (para datar corretamente por período).
+  const recoveryEvents = await mapLimit(recoveredNumbers, 8, async (orderNumber) => {
+    const order = byNumber.get(orderNumber)!;
+    const info = perOrder.get(orderNumber)!;
+    const paidAt = (await fetchPaidAt(order)) ?? new Date().toISOString();
+    const shopifyPhone = (order.customer?.phone || order.shipping_address?.phone || "")
+      .replace(/[^\d]/g, "") || null;
+    return {
+      at: paidAt,
+      orderNumber,
+      name: nameByNumber.get(orderNumber) || "—",
+      phone: info.phone ?? shopifyPhone,
+      valueEur: parseFloat(order.total_price ?? "0") || 0,
+      remindersReceived: info.count,
+    } satisfies RecoveryEvent;
+  });
+
+  const reminderEvents: ReminderEvent[] = reminders.map((r) => ({
+    at: new Date(r.timestamp * 1000).toISOString(),
+    type: r.type,
+    orderNumber: r.orderNumber,
+    name: r.orderNumber ? nameByNumber.get(r.orderNumber) ?? null : null,
+  }));
+
+  reminderEvents.sort((a, b) => b.at.localeCompare(a.at));
+  recoveryEvents.sort((a, b) => b.at.localeCompare(a.at));
   awaiting.sort((a, b) => b.valueEur - a.valueEur);
-
-  const decided = recovered.length + awaiting.length;
-
-  // ── Timelines ──────────────────────────────────────────────────────────────
-  // Data de pagamento das recuperadas (até 30, em paralelo).
-  const paidAtByNumber = new Map<string, string>();
-  await Promise.all(
-    recovered.slice(0, 30).map(async (r) => {
-      const order = byNumber.get(r.orderNumber);
-      if (!order) return;
-      const paidAt = await fetchPaidAt(order);
-      if (paidAt) paidAtByNumber.set(r.orderNumber, paidAt);
-    }),
-  );
-
-  // Série diária contínua desde o arranque da automação até hoje (hora PT).
-  const dayMap = new Map<string, DailyPoint>();
-  const startMs = Date.parse(AUTOMATION_START);
-  for (let ms = startMs; lisbonDay(ms) <= lisbonDay(Date.now()); ms += 86_400_000) {
-    const d = lisbonDay(ms);
-    dayMap.set(d, { date: d, r1: 0, r2: 0, r3: 0, owner: 0, recoveredCount: 0, recoveredEur: 0 });
-  }
-  for (const r of reminders) {
-    const p = dayMap.get(lisbonDay(r.timestamp * 1000));
-    if (p) p[r.type]++;
-  }
-  for (const r of recovered) {
-    const paidAt = paidAtByNumber.get(r.orderNumber);
-    const p = paidAt ? dayMap.get(lisbonDay(Date.parse(paidAt))) : undefined;
-    if (p) {
-      p.recoveredCount++;
-      p.recoveredEur = Math.round((p.recoveredEur + r.valueEur) * 100) / 100;
-    }
-  }
-
-  // Feed de eventos: lembretes + pagamentos, mais recentes primeiro.
-  const nameByNumber = new Map<string, string>();
-  for (const [num, o] of byNumber) {
-    const n = [o.customer?.first_name, o.customer?.last_name].filter(Boolean).join(" ");
-    if (n) nameByNumber.set(num, n);
-  }
-  const events: TimelineEvent[] = [
-    ...reminders.map((r) => ({
-      at: new Date(r.timestamp * 1000).toISOString(),
-      kind: r.type as TimelineEvent["kind"],
-      orderNumber: r.orderNumber,
-      name: r.orderNumber ? nameByNumber.get(r.orderNumber) ?? null : null,
-      valueEur: null,
-    })),
-    ...recovered
-      .filter((r) => paidAtByNumber.has(r.orderNumber))
-      .map((r) => ({
-        at: new Date(paidAtByNumber.get(r.orderNumber)!).toISOString(),
-        kind: "paid" as const,
-        orderNumber: r.orderNumber,
-        name: r.name,
-        valueEur: r.valueEur,
-      })),
-  ]
-    .sort((a, b) => b.at.localeCompare(a.at))
-    .slice(0, 25);
 
   return {
     generatedAt: new Date().toISOString(),
-    remindersSent: {
-      ...counts,
-      total: counts.r1 + counts.r2 + counts.r3 + counts.owner,
-    },
-    ordersReminded: perOrder.size,
-    ordersRecovered: recovered.length,
-    recoveredValueEur: Math.round(recoveredValue * 100) / 100,
-    pendingValueEur: Math.round(pendingValue * 100) / 100,
-    recoveryRate: decided > 0 ? recovered.length / decided : 0,
-    recoveredOrders: recovered,
+    automationStart: AUTOMATION_START,
+    reminderEvents,
+    recoveryEvents,
     awaitingOrders: awaiting,
-    daily: [...dayMap.values()],
-    events,
   };
 }
