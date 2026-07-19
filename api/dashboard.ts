@@ -132,6 +132,8 @@ const PAGE = `<!DOCTYPE html>
   td.money { font-family: var(--serif); font-weight: 700; font-size: 15px; }
   .pill { display: inline-block; min-width: 24px; text-align: center; padding: 1px 8px;
     border-radius: 999px; font-size: 12px; background: var(--gold-soft); color: var(--gold-deep); font-weight: 600; }
+  .pill.stage { background: #e2ecd8; color: var(--olive); }
+  .stage-txt { color: var(--olive); font-weight: 600; }
   .empty { color: var(--muted); padding: 22px 20px; font-size: 14px; font-style: italic; text-align: center; }
   #error { display: none; background: #f7e8e6; border: 1px solid #e0c2bd; color: #ac2828;
     padding: 12px 16px; border-radius: 4px; margin: 0 0 18px; text-align: center; }
@@ -162,9 +164,15 @@ const PAGE = `<!DOCTYPE html>
   .gate-rule { width: 34px; height: 2px; background: var(--gold); margin: 0 auto 24px; border-radius: 2px; }
   #gate-form label { display: block; text-align: left; font-size: 11px; color: var(--muted);
     margin-bottom: 7px; text-transform: uppercase; letter-spacing: 1.2px; }
-  #gate-pass { width: 100%; padding: 12px 14px; border: 1px solid var(--line); border-radius: 6px;
+  .pass-wrap { position: relative; }
+  #gate-pass { width: 100%; padding: 12px 44px 12px 14px; border: 1px solid var(--line); border-radius: 6px;
     font: inherit; font-size: 15px; background: #fff; color: var(--ink); }
   #gate-pass:focus { outline: none; border-color: var(--gold); box-shadow: 0 0 0 3px rgba(171,140,82,.16); }
+  .pass-eye { position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+    background: none; border: 0; cursor: pointer; font-size: 16px; padding: 6px 8px;
+    opacity: .55; line-height: 1; border-radius: 6px; }
+  .pass-eye:hover { opacity: 1; }
+  .pass-eye[aria-pressed="true"] { opacity: 1; }
   #gate-form button { width: 100%; margin-top: 16px; padding: 12px; border: 0; border-radius: 6px;
     background: var(--gold-deep); color: #fff; font: inherit; font-size: 14.5px; font-weight: 600;
     letter-spacing: .4px; cursor: pointer; transition: background .2s; }
@@ -182,7 +190,10 @@ const PAGE = `<!DOCTYPE html>
     <div class="gate-sub">Painel de recuperação Multibanco</div>
     <div class="gate-rule"></div>
     <label for="gate-pass">Palavra-passe</label>
-    <input id="gate-pass" type="password" autocomplete="current-password" autofocus>
+    <div class="pass-wrap">
+      <input id="gate-pass" type="password" autocomplete="current-password" autofocus>
+      <button type="button" id="pass-toggle" class="pass-eye" aria-label="Mostrar palavra-passe" aria-pressed="false">👁</button>
+    </div>
     <button type="submit">Entrar</button>
     <div id="gate-error"></div>
   </form>
@@ -251,7 +262,7 @@ const PAGE = `<!DOCTYPE html>
   <div class="h2-note" id="rec-note"></div>
   <div class="panel">
     <table id="t-recovered">
-      <thead><tr><th>Encomenda</th><th>Cliente</th><th class="hide-sm">Telemóvel</th><th class="num-c">Lembretes</th><th class="num-c">Valor</th></tr></thead>
+      <thead><tr><th>Encomenda</th><th>Cliente</th><th class="hide-sm">Telemóvel</th><th class="num-c">Recuperada após</th><th class="num-c">Valor</th></tr></thead>
       <tbody></tbody>
     </table>
     <div class="empty" id="e-recovered" style="display:none">Nenhuma encomenda recuperada neste período. 💛</div>
@@ -390,18 +401,24 @@ const KINDS = {
   paid: { c: "#4e7d3a", label: "pago" },
 };
 
-function fillTable(id, emptyId, rows) {
+// "1º" / "2º" / "3º" (fase = nº de lembretes que a encomenda recebeu antes de pagar)
+function stageLabel(n) { return Math.min(3, Math.max(1, n || 1)) + "º"; }
+
+function fillTable(id, emptyId, rows, recovered) {
   const tbody = document.querySelector("#" + id + " tbody");
   tbody.innerHTML = "";
   const show = rows.length > 0;
   document.getElementById(emptyId).style.display = show ? "none" : "block";
   document.querySelector("#" + id).style.display = show ? "table" : "none";
   for (const r of rows) {
+    const stageCell = recovered
+      ? '<td class="num-c"><span class="pill stage">' + stageLabel(r.remindersReceived) + " lembrete</span></td>"
+      : '<td class="num-c"><span class="pill">' + r.remindersReceived + "</span></td>";
     const tr = document.createElement("tr");
     tr.innerHTML =
       "<td>#" + r.orderNumber + "</td><td>" + (r.name || "—") + "</td>" +
       '<td class="hide-sm">' + (r.phone ? "+" + r.phone : "—") + "</td>" +
-      '<td class="num-c"><span class="pill">' + r.remindersReceived + "</span></td>" +
+      stageCell +
       '<td class="num-c money">' + eur(r.valueEur) + "</td>";
     tbody.appendChild(tr);
   }
@@ -444,7 +461,7 @@ function render() {
   // feed (período)
   const feedEvents = [
     ...DATA.reminderEvents.filter(r => within(r.at, SEL, end)).map(r => ({ at: r.at, kind: r.type, orderNumber: r.orderNumber, name: r.name, valueEur: null })),
-    ...cur.recList.map(r => ({ at: r.at, kind: "paid", orderNumber: r.orderNumber, name: r.name, valueEur: r.valueEur })),
+    ...cur.recList.map(r => ({ at: r.at, kind: "paid", orderNumber: r.orderNumber, name: r.name, valueEur: r.valueEur, reminders: r.remindersReceived })),
   ].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 30);
   const ul = document.getElementById("feed"); ul.innerHTML = "";
   document.getElementById("e-feed").style.display = feedEvents.length ? "none" : "block";
@@ -454,7 +471,7 @@ function render() {
     const k = KINDS[e.kind] || KINDS.owner;
     const when = new Date(e.at).toLocaleString("pt-PT", { timeZone: "Europe/Lisbon", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
     let text;
-    if (e.kind === "paid") text = "<b>Encomenda #" + e.orderNumber + " paga</b> · <span class='val'>" + eur(e.valueEur) + "</span>" + (e.name ? " · " + e.name : "");
+    if (e.kind === "paid") text = "<b>Encomenda #" + e.orderNumber + " paga</b> · <span class='val'>" + eur(e.valueEur) + "</span> · <span class='stage-txt'>após " + stageLabel(e.reminders) + " lembrete</span>" + (e.name ? " · " + e.name : "");
     else if (e.kind === "owner") text = "<span class='muted'>Aviso interno · encomenda #" + e.orderNumber + " sem pagamento</span>";
     else text = k.label + " &rarr; <b>#" + (e.orderNumber || "?") + "</b>" + (e.name ? " · " + e.name : "");
     const li = document.createElement("li");
@@ -466,8 +483,8 @@ function render() {
   // tabela recuperadas (período) + à espera (atual)
   document.getElementById("rec-note").textContent =
     SEL == null ? "Pagas após lembrete." : "Pagas após lembrete nas últimas " + wl + ".";
-  fillTable("t-recovered", "e-recovered", cur.recList.slice().sort((a, b) => b.at.localeCompare(a.at)));
-  fillTable("t-awaiting", "e-awaiting", DATA.awaitingOrders);
+  fillTable("t-recovered", "e-recovered", cur.recList.slice().sort((a, b) => b.at.localeCompare(a.at)), true);
+  fillTable("t-awaiting", "e-awaiting", DATA.awaitingOrders, false);
 }
 
 function markUpdated() {
@@ -536,6 +553,17 @@ gateForm.addEventListener("submit", e => {
 });
 document.getElementById("logout").addEventListener("click", logout);
 window.addEventListener("resize", positionIndicator);
+
+// mostrar/ocultar palavra-passe
+document.getElementById("pass-toggle").addEventListener("click", () => {
+  const show = gatePass.type === "password";
+  gatePass.type = show ? "text" : "password";
+  const btn = document.getElementById("pass-toggle");
+  btn.setAttribute("aria-pressed", String(show));
+  btn.setAttribute("aria-label", show ? "Ocultar palavra-passe" : "Mostrar palavra-passe");
+  btn.textContent = show ? "🙈" : "👁";
+  gatePass.focus();
+});
 
 // arranque: se já houver palavra-passe guardada, entra direto; senão mostra o login.
 if (PASS) tryAuth(PASS, false); else showGate("");
